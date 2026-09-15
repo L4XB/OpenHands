@@ -9,6 +9,10 @@ type FindClientPinMismatch = (
   expected: string,
 ) => { package: string; expected: string; actual: string | null } | null;
 type ReadClientPin = () => string | null;
+type PartitionSdkPackages = (versions: Record<string, string>) => {
+  declared: string[];
+  undeclared: string[];
+};
 
 // Import after mocking - need dynamic import since the script has side effects
 describe("check-sdk-version-sync helpers", () => {
@@ -19,6 +23,7 @@ describe("check-sdk-version-sync helpers", () => {
   let findClientPinMismatch: FindClientPinMismatch;
   let readClientPin: ReadClientPin;
   let CLIENT_PACKAGE_NAME: string;
+  let partitionSdkPackages: PartitionSdkPackages;
 
   beforeEach(async () => {
     // Reset modules to get fresh imports
@@ -39,6 +44,7 @@ describe("check-sdk-version-sync helpers", () => {
       module.findClientPinMismatch as FindClientPinMismatch;
     readClientPin = module.readClientPin as ReadClientPin;
     CLIENT_PACKAGE_NAME = module.CLIENT_PACKAGE_NAME as string;
+    partitionSdkPackages = module.partitionSdkPackages as PartitionSdkPackages;
   });
 
   afterEach(() => {
@@ -168,6 +174,48 @@ describe("check-sdk-version-sync helpers", () => {
       expect(SDK_PACKAGES).toContain("openhands-workspace");
       expect(SDK_PACKAGES).toContain("openhands-agent-server");
       expect(SDK_PACKAGES).toHaveLength(4);
+    });
+  });
+
+  describe("partitionSdkPackages", () => {
+    it("separates declared packages from undeclared ones", () => {
+      const { declared, undeclared } = partitionSdkPackages({
+        "openhands-sdk": "1.46.0",
+        "openhands-workspace": "1.46.0",
+      });
+
+      expect(declared).toEqual(["openhands-sdk", "openhands-workspace"]);
+      expect(undeclared).toEqual(["openhands-tools", "openhands-agent-server"]);
+    });
+
+    it("reports what openhands-automation==1.11.1 actually declares", () => {
+      // The released requires_dist carries openhands-sdk and
+      // openhands-workspace only, so agent-server is the package free to
+      // resolve to whatever is newest on PyPI (see #17436).
+      const versions = parseSdkVersionsFromRequiresDist([
+        "openhands-sdk==1.46.0",
+        "openhands-workspace==1.46.0",
+      ]);
+
+      expect(partitionSdkPackages(versions).undeclared).toContain(
+        "openhands-agent-server",
+      );
+    });
+
+    it("leaves nothing unverified when every package is declared", () => {
+      const { declared, undeclared } = partitionSdkPackages({
+        "openhands-sdk": "1.46.0",
+        "openhands-tools": "1.46.0",
+        "openhands-workspace": "1.46.0",
+        "openhands-agent-server": "1.46.0",
+      });
+
+      expect(declared).toHaveLength(SDK_PACKAGES.length);
+      expect(undeclared).toEqual([]);
+    });
+
+    it("treats an empty dependency set as fully unverified", () => {
+      expect(partitionSdkPackages({}).undeclared).toEqual(SDK_PACKAGES);
     });
   });
 

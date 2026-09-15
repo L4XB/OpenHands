@@ -22,12 +22,18 @@
  * The expected SDK dependency version is versions.agentServer — the two must
  * always match, so this script catches any drift.
  *
+ * A package the automation release does not declare at all cannot be verified,
+ * and is reported as unverified rather than as in sync: presets/setup.sh
+ * installs the declared pins and lets anything else resolve to the newest
+ * release, so an undeclared package is the one free to drift.
+ *
  * This script is run in CI to catch version drift between projects.
  *
  * Usage:
  *   node scripts/check-sdk-version-sync.mjs
  *   EXPECTED_SDK_VERSION=1.46.0 node scripts/check-sdk-version-sync.mjs
  *   node scripts/check-sdk-version-sync.mjs --check-pypi
+ *   node scripts/check-sdk-version-sync.mjs --strict
  *
  * Environment variables:
  *   EXPECTED_SDK_VERSION      - Override the expected version (instead of reading from config/defaults.json)
@@ -36,11 +42,12 @@
  *
  * Options:
  *   --check-pypi    Also check the latest SDK version on PyPI
+ *   --strict        Also fail when an SDK package is undeclared and so unverified
  *   --help          Show help
  *
  * Exit codes:
- *   0 - All SDK versions match
- *   1 - Version mismatch detected or error occurred
+ *   0 - All declared SDK versions match (without --strict, unverified packages still pass)
+ *   1 - Version mismatch detected, an unverified package under --strict, or an error occurred
  */
 
 import { readFileSync } from "node:fs";
@@ -54,6 +61,7 @@ const projectRoot = join(__dirname, "..");
 // Parse command line arguments
 const args = process.argv.slice(2);
 const checkPyPI = args.includes("--check-pypi");
+const strict = args.includes("--strict");
 const showHelp = args.includes("--help") || args.includes("-h");
 
 if (showHelp) {
@@ -71,6 +79,7 @@ Usage:
 
 Options:
   --check-pypi    Also check the latest SDK version on PyPI
+  --strict        Also fail when an SDK package is undeclared and so unverified
   --help, -h      Show this help
 
 Environment variables:
@@ -297,6 +306,29 @@ async function fetchPyPIDependencies(packageName, version) {
 }
 
 /**
+ * Split SDK_PACKAGES into the ones the automation release declares and the
+ * ones it does not.
+ *
+ * An undeclared package is the risky case, not a benign one. presets/setup.sh
+ * installs the versions the automation release pins and lets everything else
+ * resolve to the newest release on PyPI, so a package that is absent here is
+ * exactly the one free to float away from versions.agentServer at install
+ * time. Reporting it as verified is what let openhands-agent-server drift.
+ */
+function partitionSdkPackages(automationVersions) {
+  const declared = [];
+  const undeclared = [];
+  for (const pkg of SDK_PACKAGES) {
+    if (automationVersions[pkg]) {
+      declared.push(pkg);
+    } else {
+      undeclared.push(pkg);
+    }
+  }
+  return { declared, undeclared };
+}
+
+/**
  * Parse PyPI requires_dist array and extract SDK package versions
  *
  * PyPI returns dependencies in PEP 508 format like:
@@ -434,9 +466,8 @@ async function main() {
           });
         }
       } else {
-        // Package not found - might be a transitive dependency, not an error
         console.log(
-          `  ${pkg.padEnd(25)} ${colors.dim}- not a direct dependency${colors.reset}`,
+          `  ${pkg.padEnd(25)} ${colors.yellow}? not declared - version NOT verified${colors.reset}`,
         );
       }
     }
@@ -475,6 +506,44 @@ async function main() {
       process.exit(1);
     }
 
+    const { declared, undeclared } = partitionSdkPackages(automationVersions);
+
+    if (undeclared.length > 0) {
+      console.log(
+        `${colors.yellow}${declared.length}/${SDK_PACKAGES.length} SDK versions verified in sync; ${undeclared.length} unverified.${colors.reset}`,
+      );
+      console.log("");
+      console.log(
+        `${AUTOMATION_PACKAGE_NAME}==${automationVersion} does not declare: ${undeclared.join(", ")}.`,
+      );
+      console.log(
+        `Nothing holds those to ${expectedVersion}: presets/setup.sh installs the declared`,
+      );
+      console.log(
+        "pins and lets the rest resolve to the newest release on PyPI, so a run venv can",
+      );
+      console.log(
+        "end up on a different version than the service it talks to.",
+      );
+      console.log("");
+      console.log("To close the gap, update one of the following:");
+      console.log(
+        `  1. Release a new ${AUTOMATION_PACKAGE_NAME} that pins ${undeclared.join(", ")}`,
+      );
+      console.log(
+        `  2. Update versions.automation in config/defaults.json to a release that does`,
+      );
+      console.log("");
+      if (strict) {
+        console.log(
+          `${colors.red}--strict: unverified SDK packages are treated as a failure.${colors.reset}`,
+        );
+        console.log("");
+        process.exit(1);
+      }
+      return;
+    }
+
     console.log(
       `${colors.green}All SDK versions are in sync!${colors.reset}`,
     );
@@ -490,6 +559,7 @@ export {
   normalizeVersion,
   versionsEqual,
   parseSdkVersionsFromRequiresDist,
+  partitionSdkPackages,
   findClientPinMismatch,
   readClientPin,
   SDK_PACKAGES,
